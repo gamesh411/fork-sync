@@ -14,34 +14,84 @@ const octokit = new MyOctokit({
 });
 
 async function run() {
-  const owner = core.getInput('owner', { required: false }) || context.repo.owner;
+  const titlePrefix = '[fork-sync]';
+  const owner = core.getInput('owner', { required: false }) ||
+    context.repo.owner;
   const base = core.getInput('base', { required: false });
   const head = core.getInput('head', { required: false });
   const mergeMethod = core.getInput('merge_method', { required: false });
-  const prTitle = core.getInput('pr_title', { required: false });
+  const prTitle =
+    `${titlePrefix} ${core.getInput('pr_title', { required: false })}`;
   const prMessage = core.getInput('pr_message', { required: false });
   const ignoreFail = core.getInput('ignore_fail', { required: false });
   const autoApprove = core.getInput('auto_approve', { required: false });
 
   try {
-    let pr = await octokit.pulls.create({ owner: context.repo.owner, repo: context.repo.repo, title: prTitle, head: owner + ':' + head, base: base, body: prMessage, merge_method: mergeMethod, maintainer_can_modify: false });
-    await delay(20);
+    const ownerHead = `${owner}:${head}`;
+
+    const { data: pullsFromUpstream } = await octokit.pulls.list({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      state: 'open',
+      head: ownerHead,
+      base: base,
+      sort: 'created' });
+
+    const thisActionsPRs = pullsFromUpstream.filter(
+        pr => pr.title.startsWith(titlePrefix));
+
+    const numOpenSyncPRs = thisActionsPRs.length;
+
+    if (numOpenSyncPRs > 1)
+      core.warning('Multiple pulls from this action. This is not ' +
+                   'supposed to happen. Using last created PR.');
+
+    if (numOpenSyncPRs > 0) {
+      core.info(`Sync PR #${thisActionsPRs[0].number} already open.`);
+      return;
+    }
+
+    const { data: pr } = await octokit.pulls.create({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      title: prTitle,
+      head: ownerHead,
+      base: base,
+      body: prMessage,
+      merge_method: mergeMethod,
+      maintainer_can_modify: false });
+
+    core.info(`Sync PR #${pr.number} created.`)
+
     if (autoApprove) {
-        await octokit.pulls.createReview({ owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.data.number, event: "COMMENT", body: "Auto approved" });
-        await octokit.pulls.createReview({ owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.data.number, event: "APPROVE" });
+      await octokit.pulls.createReview({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: pr.number,
+        event: "COMMENT",
+        body: "Auto approved" });
+      await octokit.pulls.createReview({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: pr.number,
+        event: "APPROVE" });
     }
-    await octokit.pulls.merge({ owner: context.repo.owner, repo: context.repo.repo, pull_number: pr.data.number });
+
   } catch (error) {
-    if (error.request.request.retryCount) {
-      console.log(
-        `request failed after ${error.request.request.retryCount} retries with a delay of ${error.request.request.retryAfter}`
-      );
+    if (error?.request?.request?.retryCount) {
+      core.error(
+        `request failed after ${error.request.request.retryCount} retries ` +
+        `with a delay of ${error.request.request.retryAfter}`);
     }
-    if (!!error.errors && !!error.errors[0] && !!error.errors[0].message && error.errors[0].message.startsWith('No commits between')) {
-      console.log('No commits between ' + context.repo.owner + ':' + base + ' and ' + owner + ':' + head);
+    if (error?.errors?.[0]?.message &&
+        error.errors[0].message.startsWith('No commits between')) {
+      core.error(
+        `No commits between ${context.repo.owner}:${base} and ` +
+        `${owner}:${head}`);
     } else {
       if (!ignoreFail) {
-        core.setFailed(`Failed to create or merge pull request: ${error ?? "[n/a]"}`);
+        core.setFailed(
+          `Failed to create or merge pull request: ${error}`);
       }
     }
   }
